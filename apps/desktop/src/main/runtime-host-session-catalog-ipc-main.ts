@@ -27,7 +27,6 @@ import { type SessionChangedEvent, type SessionChangedReason, type SessionCatalo
 import { projectSessionCatalogSummary } from '@maka/runtime-host/client';
 import type {
   SessionCatalogProjection,
-  SharedSessionCatalogProjection,
   SessionCreateInput,
   WorkspaceTarget,
   SessionModelTarget,
@@ -247,40 +246,6 @@ export function registerRuntimeHostSharedSessionCatalogIpc(
     const session = await deps.getSession();
     return session ? [session] : [];
   });
-}
-
-export function toDesktopHostSharedSessionSummary(
-  session: SharedSessionCatalogProjection,
-): DesktopHostSessionSummary {
-  return {
-    id: session.id,
-    revision: session.revision,
-    name: session.name,
-    activityAt: session.activityAt,
-    isFlagged: false,
-    isArchived: false,
-    labels: [],
-    labelsTruncated: false,
-    hasUnread: false,
-    ...(session.lastMessageAt === undefined ? {} : { lastMessageAt: session.lastMessageAt }),
-    ...(session.lastMessagePreview === undefined
-      ? {}
-      : { lastMessagePreview: session.lastMessagePreview }),
-    status: session.status,
-    ...(session.liveRunState === undefined
-      ? {}
-      : { runningTurnIds: [...session.liveRunState.runningTurnIds] }),
-    ...(session.blockedReason === undefined ? {} : { blockedReason: session.blockedReason }),
-    ...(session.statusUpdatedAt === undefined
-      ? {}
-      : { statusUpdatedAt: session.statusUpdatedAt }),
-    backend: 'ai-sdk',
-    llmConnectionSlug: '',
-    connectionLocked: true,
-    model: '',
-    permissionMode: 'ask',
-    shared: true,
-  };
 }
 
 /**

@@ -51,7 +51,7 @@ import {
   ShellRunHydration,
   type ShellRunUpdatesBySession,
 } from './shell-run-update-state.js';
-import { runtimeHostChangeRetiresSession } from '../shared/runtime-host-identity.js';
+import { sessionCatalogRetiresSession } from '../shared/runtime-host-identity.js';
 import {
   createDesktopTranscriptRangeController,
   DesktopTranscriptRangeStore,
@@ -154,7 +154,6 @@ export function useAppShellBootstrapSubscriptions(options: {
   clearPendingTurnActionsForSession: (sessionId: string) => void;
   /** Releases a send's pending claim once the authority names that turn. */
   confirmLiveTurn: (sessionId: string, turnId: string) => void;
-  clearSessionRendererState: (sessionId: string) => void;
   createSession: () => Promise<void> | void;
   handleConnectionEvent: (event: ConnectionEvent) => void;
   openHelp: () => void;
@@ -169,8 +168,7 @@ export function useAppShellBootstrapSubscriptions(options: {
   refreshShellSettings: () => Promise<void>;
   refreshSessions: () => Promise<SessionSummary[]>;
   rendererMountedRef: RefBox<boolean>;
-  setActiveId: (sessionId: string | undefined) => void;
-  setMessages: (messages: StoredMessage[]) => void;
+  retireSession: (sessionId: string) => void;
   setSessionEventHealthBySession: SessionEventHealthUpdater;
   toastApi: ToastApi;
 }) {
@@ -184,10 +182,8 @@ export function useAppShellBootstrapSubscriptions(options: {
   const handleRuntimeHostChange = useEffectEvent((event: DesktopRuntimeHostProfileChangedEvent) => {
     void options.refreshSessions().then((sessions) => {
       const activeSessionId = options.activeIdRef.current;
-      if (!runtimeHostChangeRetiresSession(event, activeSessionId, sessions)) return;
-      options.setActiveId(undefined);
-      options.setMessages([]);
-      options.clearSessionRendererState(activeSessionId);
+      if (!sessionCatalogRetiresSession(activeSessionId, sessions)) return;
+      options.retireSession(activeSessionId);
     });
     if (event.readiness !== 'ready') return;
     if (!event.isDefault) return;
@@ -215,7 +211,7 @@ export function useAppShellBootstrapSubscriptions(options: {
       if (event.sessionId && event.turnId) {
         options.confirmLiveTurn(event.sessionId, event.turnId);
       }
-      void options.refreshSessions();
+      const refreshedSessions = options.refreshSessions();
       if (event.reason === 'created' || event.reason === 'migrated') {
         void options.refreshProjects();
       }
@@ -243,12 +239,11 @@ export function useAppShellBootstrapSubscriptions(options: {
       const copy = getDesktopConversationCopy(options.uiLocale).actions;
       options.toastApi.info(copy.modelReboundTitle, copy.modelReboundDescription(event.modelId));
     }
-    if (event.reason === 'deleted' && event.sessionId && event.sessionId === options.activeIdRef.current) {
-      const deletedSessionId = event.sessionId;
-      options.setActiveId(undefined);
-      options.setMessages([]);
-      options.clearSessionRendererState(deletedSessionId);
-    }
+    void refreshedSessions.then((sessions) => {
+      const activeSessionId = options.activeIdRef.current;
+      if (!sessionCatalogRetiresSession(activeSessionId, sessions)) return;
+      options.retireSession(activeSessionId);
+    });
     },
   );
   // Both shortcuts fire while the composer has focus — they always did, and

@@ -1272,8 +1272,7 @@ function AppShellContent({
   // Session and connection snapshot IPCs are redundant.
   // This lets the UI show the sidebar + model picker immediately on first load.
   const initialSnapshotSeededRef = useRef(false);
-  const mountedSnapshotSeededRef = useRef(false);
-  const bootstrapFallbackStartedRef = useRef(false);
+  const bootstrapRefreshStartedRef = useRef(false);
   // useLayoutEffect, NOT useEffect: the snapshot render flips
   // `isOnboardingLoading` off while `sessions` is still []. A passive
   // effect seeds sessions AFTER the browser paints that frame, so users
@@ -1287,35 +1286,30 @@ function AppShellContent({
       onboarding.error &&
       !initialOnboardingSnapshot &&
       !onboarding.mountedSnapshotHandoff &&
-      !bootstrapFallbackStartedRef.current
+      !bootstrapRefreshStartedRef.current
     ) {
-      bootstrapFallbackStartedRef.current = true;
+      bootstrapRefreshStartedRef.current = true;
       void bootstrapSessions();
       void defaultHostConnections.refreshConnections();
       return;
     }
-    let snapshot: OnboardingSnapshot | null = null;
-    let releaseSelectionLease = false;
     if (!initialSnapshotSeededRef.current && initialOnboardingSnapshot) {
       initialSnapshotSeededRef.current = true;
-      snapshot = initialOnboardingSnapshot;
-    } else if (
-      !bootstrapFallbackStartedRef.current &&
-      !mountedSnapshotSeededRef.current &&
+      // This prop settled before React mounted, so it is the only onboarding
+      // value allowed to seed the catalog. Later snapshots must go through the
+      // authoritative refresher or they can overwrite a newer Guest-inclusive
+      // catalog with an older Host-only view.
+      const next = seedSessions(initialOnboardingSnapshot.sessions);
+      bootstrapSelectionLease.reconcile(collapseSessionRevisions(next));
+      return;
+    }
+    if (
+      !bootstrapRefreshStartedRef.current &&
       onboarding.mountedSnapshotHandoff
     ) {
-      mountedSnapshotSeededRef.current = true;
-      snapshot = onboarding.mountedSnapshotHandoff;
-      releaseSelectionLease = true;
+      bootstrapRefreshStartedRef.current = true;
+      void bootstrapSessions();
     }
-    if (!snapshot) return;
-    // Seed sessions. Display normalization MUST run here too — this is
-    // Display normalization prevents legacy blocked/unknown
-    // sessions flash an 已阻塞 group on first paint until the first
-    // refreshSessions() overwrites the seed.
-    const next = seedSessions(snapshot.sessions);
-    bootstrapSelectionLease.reconcile(collapseSessionRevisions(next));
-    if (releaseSelectionLease) bootstrapSelectionLease.release();
   }, [initialOnboardingSnapshot, onboarding.mountedSnapshotHandoff, onboarding.error]);
   useEffect(() => {
     const snapshot = initialOnboardingSnapshot ?? onboarding.mountedSnapshotHandoff;
@@ -2300,7 +2294,6 @@ function AppShellContent({
     bootstrapSessions,
     clearPendingTurnActionsForSession: turnActionRegistry.clearForSession,
     confirmLiveTurn: sessionUiController.confirmLiveTurn,
-    clearSessionRendererState,
     createSession,
     handleConnectionEvent,
     openHelp,
@@ -2315,8 +2308,11 @@ function AppShellContent({
     refreshShellSettings,
     refreshSessions,
     rendererMountedRef,
-    setActiveId,
-    setMessages,
+    retireSession: (sessionId) => {
+      setActiveId(undefined);
+      setMessages([]);
+      clearSessionRendererState(sessionId);
+    },
     setSessionEventHealthBySession: sessionUiController.setSessionEventHealthBySession,
     toastApi,
   });

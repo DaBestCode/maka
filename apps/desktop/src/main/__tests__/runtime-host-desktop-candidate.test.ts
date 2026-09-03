@@ -190,6 +190,7 @@ test('registers only shared observation IPC and consumes scoped catalog changes 
   const sharedResource = sharedShellRunUpdate('session-guest');
   const host = connectionHarness('guest', { runtimeResourceUpdate: sharedResource });
   const changes: Array<{ reason: string; sessionId?: string }> = [];
+  let catalogChanges = 0;
   const rendererEvents: Array<{ channel: string; payload: unknown }> = [];
   const candidate = await createCandidate(
     host.connection,
@@ -197,6 +198,9 @@ test('registers only shared observation IPC and consumes scoped catalog changes 
       ...deps(ipc),
       emitSessionsChanged: (_scope, reason, sessionId) => {
         changes.push({ reason, ...(sessionId === undefined ? {} : { sessionId }) });
+      },
+      onGuestSessionCatalogChanged: () => {
+        catalogChanges += 1;
       },
       renderer: {
         send(channel, _scope, payload) {
@@ -242,6 +246,7 @@ test('registers only shared observation IPC and consumes scoped catalog changes 
     ),
   );
   host.publishSessionCatalogChange('session-guest');
+  assert.equal(catalogChanges, 1);
   assert.deepEqual(changes, [{ reason: 'updated', sessionId: 'session-guest' }]);
 
   await candidate.close();
@@ -857,7 +862,7 @@ test('drops a stale shared Session observation when Guest access is gone', async
   });
   const firstCandidate = await createCandidate(
     firstHost.connection,
-    deps(firstIpc),
+    { ...deps(firstIpc), onGuestSessionCatalogChanged: () => undefined },
     observations,
     'external',
     'remote',
@@ -877,6 +882,7 @@ test('drops a stale shared Session observation when Guest access is gone', async
       emitSessionsChanged: (_scope, reason, sessionId) => {
         changes.push({ reason, ...(sessionId === undefined ? {} : { sessionId }) });
       },
+      onGuestSessionCatalogChanged: () => undefined,
     },
     observations,
     'external',

@@ -21,35 +21,87 @@ import type { DesktopSessionSummary } from './bridge-contract.js';
 
 export interface RuntimeHostSessionCatalogRequest {
   readonly hostId: string;
+  readonly profileId: string;
   readonly access: 'owner' | 'session_guest';
   readonly sessions: Promise<DesktopSessionSummary[]>;
 }
 
 export interface RuntimeHostSessionCatalogCoverage {
   readonly sessions: DesktopSessionSummary[];
+  /** Hosts whose Owner catalog answered authoritatively. */
   readonly completeHostIds: string[];
+  /** Guest profiles whose single-session catalog answered authoritatively. */
+  readonly completeGuestProfileIds: string[];
 }
 
 export interface RuntimeHostSessionCatalogSnapshot extends RuntimeHostSessionCatalogCoverage {
   /** Profiles still retained by Desktop, including unavailable Guest mounts. */
   readonly knownProfileIds: string[];
+  /** Last authenticated Guest rows retained across a Desktop restart. */
+  readonly retainedGuestSessions?: DesktopSessionSummary[];
+}
+
+export interface RuntimeHostSessionCatalogRefresher {
+  refresh(): Promise<DesktopSessionSummary[]>;
+}
+
+export function createRuntimeHostSessionCatalogRefresher(input: {
+  readonly listSessions: () => Promise<DesktopSessionSummary[]>;
+  readonly currentSessions: () => DesktopSessionSummary[];
+  readonly commitSessions: (sessions: DesktopSessionSummary[]) => void;
+}): RuntimeHostSessionCatalogRefresher {
+  let dirty = false;
+  let active: Promise<DesktopSessionSummary[]> | undefined;
+  const drain = async (): Promise<DesktopSessionSummary[]> => {
+    try {
+      let sessions = input.currentSessions();
+      do {
+        dirty = false;
+        try {
+          const candidate = await input.listSessions();
+          // A later invalidation supersedes this observation before it can
+          // mutate the authority map. The trailing read is the one to commit.
+          if (dirty) continue;
+          sessions = candidate;
+          input.commitSessions(candidate);
+        } catch (error) {
+          // Like a successful stale read, a superseded failure cannot decide
+          // the drain. Let the already-admitted trailing read decide instead.
+          if (!dirty) throw error;
+          sessions = input.currentSessions();
+        }
+      } while (dirty);
+      return sessions;
+    } finally {
+      active = undefined;
+    }
+  };
+  return {
+    refresh() {
+      dirty = true;
+      if (!active) active = drain();
+      return active;
+    },
+  };
 }
 
 export async function resolveRuntimeHostSessionCatalog(
   current: readonly DesktopSessionSummary[],
   coverage: Promise<RuntimeHostSessionCatalogCoverage>,
-  knownRuntimeProfileIds: () => readonly string[],
-  guestMountProfileIds: Promise<readonly string[]>,
+  knownOwnerProfileIds: () => readonly string[],
+  retainedGuestSessions: Promise<DesktopSessionSummary[]>,
 ): Promise<DesktopSessionSummary[]> {
-  const [snapshot, knownGuestProfileIds] = await Promise.all([
+  const [snapshot, retainedGuests] = await Promise.all([
     coverage,
-    guestMountProfileIds.catch(() =>
-      current.flatMap((session) => session.shared === true ? [session.profileId] : []),
-    ),
+    retainedGuestSessions.catch(() => current.filter((session) => session.shared === true)),
   ]);
   return reconcileRuntimeHostSessionCatalog(current, {
     ...snapshot,
-    knownProfileIds: [...knownRuntimeProfileIds(), ...knownGuestProfileIds],
+    knownProfileIds: [
+      ...knownOwnerProfileIds(),
+      ...retainedGuests.map(({ profileId }) => profileId),
+    ],
+    retainedGuestSessions: retainedGuests,
   });
 }
 
@@ -57,34 +109,43 @@ export async function collectRuntimeHostSessionCatalogsWithCoverage(
   requests: readonly RuntimeHostSessionCatalogRequest[],
 ): Promise<RuntimeHostSessionCatalogCoverage> {
   const results = await Promise.allSettled(requests.map((request) => request.sessions));
-  const fulfilled = results.flatMap((result, index) => result.status === 'fulfilled'
-    ? [{ ...requests[index]!, sessions: result.value }]
-    : []);
-  const fulfilledRequests = new Set(
-    results.flatMap((result, index) => result.status === 'fulfilled' ? [requests[index]!] : []),
+  const fulfilled = results.flatMap((result, index) =>
+    result.status === 'fulfilled' ? [{ ...requests[index]!, sessions: result.value }] : [],
   );
-  if (requests.length > 0 && fulfilled.length === 0) {
-    throw new AggregateError(
-      results.flatMap((result) => result.status === 'rejected' ? [result.reason] : []),
-      'Every Runtime Host Session Catalog request failed',
-    );
+  const completeHostIds = new Set<string>();
+  const completeGuestProfileIds = new Set<string>();
+  for (const request of fulfilled) {
+    if (request.access === 'owner') completeHostIds.add(request.hostId);
+    else completeGuestProfileIds.add(request.profileId);
   }
-  const hostIds = [...new Set(requests.map((request) => request.hostId))];
   return {
     sessions: sortSessionCatalogs(fulfilled.flatMap((entry) => entry.sessions)),
-    completeHostIds: hostIds.filter((hostId) => {
-      const hostRequests = requests.filter((request) => request.hostId === hostId);
-      const ownerRequests = hostRequests.filter((request) => request.access === 'owner');
-      return ownerRequests.length > 0
-        ? ownerRequests.some((request) => fulfilledRequests.has(request))
-        : hostRequests.every((request) => fulfilledRequests.has(request));
-    }),
+    completeHostIds: [...completeHostIds],
+    completeGuestProfileIds: [...completeGuestProfileIds],
   };
 }
 
 /**
- * Commits complete Host catalogs authoritatively while retaining the last
- * accepted rows for a Host that still exists but cannot answer this read.
+ * An observation may establish an unknown Session authority, but only an
+ * accepted catalog may replace one. Returns false when the observation came
+ * from a different profile and should therefore trigger a generic refresh.
+ */
+export function recordObservedRuntimeHostSessionAuthority(
+  authorities: Map<string, string>,
+  sessionId: string,
+  profileId: string,
+): boolean {
+  const accepted = authorities.get(sessionId);
+  if (accepted === undefined) {
+    authorities.set(sessionId, profileId);
+    return true;
+  }
+  return accepted === profileId;
+}
+
+/**
+ * Commits complete Owner catalogs per Host and Guest catalogs per profile,
+ * while retaining the last accepted rows for an authority that cannot answer.
  * An explicitly removed profile is absent from knownProfileIds and therefore
  * retires immediately; transport availability alone cannot change access.
  */
@@ -93,14 +154,46 @@ export function reconcileRuntimeHostSessionCatalog(
   snapshot: RuntimeHostSessionCatalogSnapshot,
 ): DesktopSessionSummary[] {
   const completeHostIds = new Set(snapshot.completeHostIds);
+  const completeGuestProfileIds = new Set(snapshot.completeGuestProfileIds);
   const knownProfileIds = new Set(snapshot.knownProfileIds);
-  return sortSessionCatalogs([
-    ...snapshot.sessions,
-    ...current.filter(
-      (session) =>
-        knownProfileIds.has(session.profileId) && !completeHostIds.has(session.runtimeHostId),
-    ),
-  ]);
+  const retainable = (session: DesktopSessionSummary) =>
+    knownProfileIds.has(session.profileId) &&
+    !completeHostIds.has(session.runtimeHostId) &&
+    !completeGuestProfileIds.has(session.profileId);
+  const retained = mergeRetainedGuestSessions(
+    current.filter(retainable),
+    (snapshot.retainedGuestSessions ?? []).filter(retainable),
+  );
+  // A fulfilled catalog is the newest authenticated authority observation.
+  // Retained rows only fill gaps; even an Owner-shaped cache must not replace
+  // a live Guest row when the Owner profile could not answer this refresh.
+  const live = sortSessionCatalogs(snapshot.sessions);
+  const liveSessionIds = new Set(live.map(({ id }) => id));
+  return sortSessionCatalogs([...live, ...retained.filter(({ id }) => !liveSessionIds.has(id))]);
+}
+
+function mergeRetainedGuestSessions(
+  current: readonly DesktopSessionSummary[],
+  retained: readonly DesktopSessionSummary[],
+): DesktopSessionSummary[] {
+  const unique = new Map(current.map((session) => [session.id, session]));
+  for (const session of retained) {
+    const cached = unique.get(session.id);
+    if (!cached) {
+      unique.set(session.id, session);
+      continue;
+    }
+    if (
+      cached.shared === true &&
+      session.shared === true &&
+      cached.profileId === session.profileId &&
+      session.revision !== undefined &&
+      (cached.revision === undefined || session.revision > cached.revision)
+    ) {
+      unique.set(session.id, session);
+    }
+  }
+  return [...unique.values()];
 }
 
 function sortSessionCatalogs(sessions: DesktopSessionSummary[]): DesktopSessionSummary[] {

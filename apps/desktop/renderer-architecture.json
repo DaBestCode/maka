@@ -547,7 +547,7 @@
           "react": 1
         },
         "importSpecifiers": 39,
-        "nonTriviaTokens": 3836
+        "nonTriviaTokens": 3785
       },
       "src/renderer/app-shell-overlays.tsx": {
         "importDeclarations": 14,
@@ -851,7 +851,7 @@
           "useNewTaskChoice": 1,
           "useOnboardingSnapshot": 1,
           "usePlanModeState": 1,
-          "useRef": 25,
+          "useRef": 24,
           "useSessionCollaborationDialog": 1,
           "useSessionEventHealthPolling": 1,
           "useSessionNavigationReads": 1,
@@ -980,7 +980,7 @@
           "react": 1
         },
         "importSpecifiers": 184,
-        "nonTriviaTokens": 15687
+        "nonTriviaTokens": 15654
       },
       "src/renderer/use-app-shell-composer-quotes.ts": {
         "importDeclarations": 3,

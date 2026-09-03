@@ -123,6 +123,8 @@ import type { BotOnboardingSnapshot, BotOnboardingStartInput } from '@maka/core/
 import type { HealthSnapshot } from '@maka/core/health';
 import {
   collectRuntimeHostSessionCatalogsWithCoverage,
+  createRuntimeHostSessionCatalogRefresher,
+  recordObservedRuntimeHostSessionAuthority,
   resolveRuntimeHostSessionCatalog,
 } from './runtime-host-session-catalog.js';
 import { collectAvailablePendingTurnRequests } from './runtime-host-turn-request-inbox.js';
@@ -220,6 +222,7 @@ import type {
 import type { AttachmentRef, InlineReference, QuoteRef } from '@maka/core/events';
 import type { OnboardingMilestoneId } from '@maka/core/onboarding';
 import {
+  decodeSharedSessionCatalogProjection,
   SCHEDULED_TASK_CATALOG_MAX_ITEMS,
   type OperationInput,
   type OperationOutcome,
@@ -250,6 +253,7 @@ import {
   type DesktopSessionSummary,
   type DesktopSessionSummaryInput,
 } from '../shared/desktop-session-projection.js';
+import { projectDesktopSharedSessionSummary } from '../shared/shared-session-catalog-projection.js';
 
 let activeRuntimeHost: DesktopTargetScope | undefined;
 let activeRuntimeHostGeneration = 0;
@@ -265,7 +269,7 @@ const runtimeHostMetadata = new Map<
     readonly profileAccess: 'owner' | 'session_guest';
   }
 >();
-const runtimeHostSessionScopes = new Map<string, RuntimeHostScopeKey>();
+const runtimeHostSessionProfiles = new Map<string, string>();
 let lastDesktopSessionCatalog: DesktopSessionSummary[] = [];
 const newTaskChangeListeners = new Set<() => void>();
 let previousMainProcessInterruptionRead: Promise<boolean> | undefined;
@@ -278,10 +282,25 @@ function runtimeHostMetadataFor(scope: DesktopTargetScope) {
   return runtimeHostMetadata.get(runtimeHostScopeKey(scope));
 }
 
-function recordRuntimeHostSessionScope(scope: DesktopTargetScope, sessionId: string): string {
+function observeRuntimeHostSessionScope(scope: DesktopTargetScope, sessionId: string): {
+  readonly sessionId: string;
+  readonly authorityAccepted: boolean;
+} {
   const projected = desktopSessionKey({ hostId: scope.hostId, sessionId });
-  runtimeHostSessionScopes.set(projected, runtimeHostScopeKey(scope));
-  return projected;
+  const profileId = runtimeHostMetadataFor(scope)?.profileId;
+  if (!profileId) throw new Error('Desktop Runtime Host metadata is unavailable');
+  return {
+    sessionId: projected,
+    authorityAccepted: recordObservedRuntimeHostSessionAuthority(
+      runtimeHostSessionProfiles,
+      projected,
+      profileId,
+    ),
+  };
+}
+
+function recordRuntimeHostSessionScope(scope: DesktopTargetScope, sessionId: string): string {
+  return observeRuntimeHostSessionScope(scope, sessionId).sessionId;
 }
 
 type RuntimeHostProfileWireEvent = DesktopRuntimeHostProfileChangedEvent;
@@ -298,11 +317,6 @@ ipcRenderer.on(
       previousScopeKey &&
       (change.removed || (nextScopeKey !== undefined && previousScopeKey !== nextScopeKey))
     ) {
-      for (const [sessionId, scopeKey] of runtimeHostSessionScopes) {
-        if (scopeKey !== previousScopeKey) continue;
-        if (nextScopeKey) runtimeHostSessionScopes.set(sessionId, nextScopeKey);
-        else runtimeHostSessionScopes.delete(sessionId);
-      }
       runtimeHostScopes.delete(previousScopeKey);
       runtimeHostMetadata.delete(previousScopeKey);
       if (change.removed) {
@@ -397,9 +411,15 @@ async function runtimeHostSessionRef(sessionId: string): Promise<{
 }> {
   const ref = parseDesktopSessionKey(sessionId);
   await runtimeHostScopeList();
-  const recordedScopeKey = runtimeHostSessionScopes.get(sessionId);
-  let scope = recordedScopeKey ? runtimeHostScopes.get(recordedScopeKey) : undefined;
-  if (!scope) {
+  const recordedProfileId = runtimeHostSessionProfiles.get(sessionId);
+  let scope: DesktopTargetScope | undefined;
+  if (recordedProfileId) {
+    const scopeKey = runtimeHostProfiles.get(recordedProfileId);
+    scope = scopeKey ? runtimeHostScopes.get(scopeKey) : undefined;
+    if (!scope || scope.hostId !== ref.hostId) {
+      throw new Error('The Runtime Host for this task is unavailable');
+    }
+  } else {
     const candidates = [...runtimeHostScopes.values()].filter(({ hostId }) => hostId === ref.hostId);
     if (candidates.length === 1) scope = candidates[0];
   }
@@ -732,7 +752,7 @@ function projectSessionSummary(
   session: DesktopSessionSummaryInput,
 ): DesktopSessionSummary {
   const projected = projectSessionCatalogSummary(scope, session);
-  runtimeHostSessionScopes.set(projected.id, runtimeHostScopeKey(scope));
+  runtimeHostSessionProfiles.set(projected.id, projected.profileId);
   return projected;
 }
 
@@ -748,14 +768,9 @@ function projectSessionCatalogSummary(
   );
 }
 
-function recordSessionCatalogScopes(sessions: readonly DesktopSessionSummary[]): void {
+function recordSessionCatalogAuthorities(sessions: readonly DesktopSessionSummary[]): void {
   for (const session of sessions) {
-    const scopeKey = runtimeHostProfiles.get(session.profileId);
-    const scope = scopeKey ? runtimeHostScopes.get(scopeKey) : undefined;
-    if (!scopeKey || !scope || scope.hostId !== session.runtimeHostId) {
-      throw new Error('Desktop Runtime Host Session scope is unavailable');
-    }
-    runtimeHostSessionScopes.set(session.id, scopeKey);
+    runtimeHostSessionProfiles.set(session.id, session.profileId);
   }
 }
 
@@ -766,13 +781,20 @@ function projectOnboardingSnapshot(
   return {
     ...snapshot,
     sessions: snapshot.sessions.map((session) => projectSessionSummary(scope, session)),
-    sessionSendOutcomes: Object.fromEntries(
-      Object.entries(snapshot.sessionSendOutcomes).map(([sessionId, outcome]) => [
-        recordRuntimeHostSessionScope(scope, sessionId),
-        outcome,
-      ]),
-    ),
+    sessionSendOutcomes: projectOnboardingSendOutcomes(scope, snapshot.sessionSendOutcomes),
   };
+}
+
+function projectOnboardingSendOutcomes(
+  scope: DesktopTargetScope,
+  outcomes: OnboardingSnapshot['sessionSendOutcomes'],
+): OnboardingSnapshot['sessionSendOutcomes'] {
+  return Object.fromEntries(
+    Object.entries(outcomes).map(([sessionId, outcome]) => [
+      recordRuntimeHostSessionScope(scope, sessionId),
+      outcome,
+    ]),
+  );
 }
 
 async function loadDesktopOnboardingSnapshot(): Promise<OnboardingSnapshot> {
@@ -797,15 +819,20 @@ async function loadDesktopOnboardingSnapshot(): Promise<OnboardingSnapshot> {
   }
   const snapshots = results.flatMap((result) =>
     result.status === 'fulfilled'
-      ? [projectOnboardingSnapshot(result.value.scope, result.value.snapshot)]
+      ? [result.value]
       : [],
   );
+  // Onboarding owns readiness and connection bootstrap data, not a second
+  // Session catalog. Use the same reconciler as every later sessions:list so
+  // retained Guest projections participate in the first renderer commit too.
+  const sessions = await listDesktopSessions();
   return {
-    ...snapshots[0],
-    sessions: snapshots.flatMap((snapshot) => snapshot.sessions),
+    ...snapshots[0]!.snapshot,
+    sessions,
     sessionSendOutcomes: Object.assign(
       {},
-      ...snapshots.map((snapshot) => snapshot.sessionSendOutcomes),
+      ...snapshots.map(({ scope, snapshot }) =>
+        projectOnboardingSendOutcomes(scope, snapshot.sessionSendOutcomes)),
     ),
   };
 }
@@ -889,6 +916,31 @@ function subscribeEveryRuntimeHostEvent<T extends readonly unknown[]>(
   };
 }
 
+function subscribeGuestSessionMountChanges(
+  handler: () => void,
+): () => void {
+  const listener = (): void => handler();
+  ipcRenderer.on('session-collaboration:mounts:changed', listener);
+  return () => ipcRenderer.off('session-collaboration:mounts:changed', listener);
+}
+
+const desktopSessionCatalogRefresher = createRuntimeHostSessionCatalogRefresher({
+  currentSessions: () => lastDesktopSessionCatalog,
+  listSessions: () => resolveRuntimeHostSessionCatalog(
+    lastDesktopSessionCatalog,
+    listDesktopSessionsWithCoverage(),
+    () => [...runtimeHostMetadata.values()].flatMap(({ profileId, profileAccess }) =>
+      profileAccess === 'owner' ? [profileId] : []),
+    // Unknown Guest coverage cannot suppress healthy Owner catalogs or prove
+    // that a previously observed Guest mount was removed.
+    listRetainedGuestCatalog(),
+  ),
+  commitSessions: (sessions) => {
+    recordSessionCatalogAuthorities(sessions);
+    lastDesktopSessionCatalog = sessions;
+  },
+});
+
 async function listDesktopSessions(
   filter?: SessionListFilter,
 ): Promise<DesktopSessionSummary[]> {
@@ -901,28 +953,22 @@ async function listDesktopSessions(
     ) as DesktopSessionSummaryInput[];
     return sessions.map((session) => projectSessionSummary(parent.scope, session));
   }
-  lastDesktopSessionCatalog = await resolveRuntimeHostSessionCatalog(
-    lastDesktopSessionCatalog,
-    listDesktopSessionsWithCoverage(),
-    () => [...runtimeHostMetadata.values()].map(({ profileId }) => profileId),
-    // Unknown Guest coverage cannot suppress healthy Owner catalogs or prove
-    // that a previously observed Guest mount was removed.
-    listKnownGuestMountProfileIds(),
-  );
-  return lastDesktopSessionCatalog;
+  return desktopSessionCatalogRefresher.refresh();
 }
 
 async function listDesktopSessionsWithCoverage(): Promise<{
   sessions: DesktopSessionSummary[];
   completeHostIds: string[];
+  completeGuestProfileIds: string[];
 }> {
   const scopes = await runtimeHostScopeList();
-  const catalog = await collectRuntimeHostSessionCatalogsWithCoverage(
+  return collectRuntimeHostSessionCatalogsWithCoverage(
     scopes.map((scope) => {
       const metadata = runtimeHostMetadataFor(scope);
       if (!metadata) throw new Error('Desktop Runtime Host metadata is unavailable');
       return {
         hostId: scope.hostId,
+        profileId: metadata.profileId,
         access: metadata.profileAccess,
         sessions: ipcRenderer.invoke('sessions:list', scope)
           .then((sessions: DesktopSessionSummaryInput[]) =>
@@ -930,26 +976,42 @@ async function listDesktopSessionsWithCoverage(): Promise<{
       };
     }),
   );
-  recordSessionCatalogScopes(catalog.sessions);
-  return catalog;
 }
 
-async function listKnownGuestMountProfileIds(): Promise<string[]> {
+async function listRetainedGuestCatalog(): Promise<DesktopSessionSummary[]> {
   const mounts: unknown = await ipcRenderer.invoke('session-collaboration:mount:list');
   if (!Array.isArray(mounts)) {
     throw new Error('Desktop shared Session mounts are unavailable');
   }
-  return mounts.map((mount) => {
+  const sessions: DesktopSessionSummary[] = [];
+  for (const mount of mounts) {
     if (
       !mount ||
       typeof mount !== 'object' ||
       !('mountId' in mount) ||
-      typeof mount.mountId !== 'string'
+      typeof mount.mountId !== 'string' ||
+      !('name' in mount) ||
+      typeof mount.name !== 'string' ||
+      !('hostId' in mount) ||
+      typeof mount.hostId !== 'string'
     ) {
       throw new Error('Desktop shared Session mount is invalid');
     }
-    return mount.mountId;
-  });
+    if (!('session' in mount) || mount.session === undefined) continue;
+    const session = decodeSharedSessionCatalogProjection(mount.session);
+    const summary = projectDesktopSharedSessionSummary(session);
+    const projected = projectDesktopSessionSummary(
+      {
+        hostId: mount.hostId,
+        profileId: mount.mountId,
+        profileName: mount.name,
+        profileKind: 'remote',
+      },
+      summary,
+    );
+    sessions.push(projected);
+  }
+  return sessions;
 }
 
 async function createDesktopSessionOnScope(
@@ -1331,6 +1393,9 @@ const makaBridge = {
     },
     listMounts() {
       return ipcRenderer.invoke('session-collaboration:mount:list');
+    },
+    subscribeMountChanges(handler) {
+      return subscribeGuestSessionMountChanges(() => handler());
     },
     removeMount(mountId) {
       return ipcRenderer.invoke('session-collaboration:mount:remove', mountId);
@@ -2216,18 +2281,26 @@ const makaBridge = {
       };
     },
     subscribeChanges(handler: (event: SessionChangedEvent) => void): () => void {
-      return subscribeEveryRuntimeHostEvent(
+      const unsubscribeRuntimeHosts = subscribeEveryRuntimeHostEvent(
         'sessions:changed',
-        (scope, event: SessionChangedEvent) =>
-          handler({
-            ...event,
-            ...(event.sessionId
-              ? {
-                  sessionId: recordRuntimeHostSessionScope(scope, event.sessionId),
-                }
-              : {}),
-          }),
+        (scope, event: SessionChangedEvent) => {
+          if (!event.sessionId) {
+            handler(event);
+            return;
+          }
+          const observed = observeRuntimeHostSessionScope(scope, event.sessionId);
+          handler(observed.authorityAccepted
+            ? { ...event, sessionId: observed.sessionId }
+            : { reason: 'updated', ts: event.ts });
+        },
       );
+      const unsubscribeMounts = subscribeGuestSessionMountChanges(() => {
+        handler({ reason: 'updated', ts: Date.now() });
+      });
+      return () => {
+        unsubscribeRuntimeHosts();
+        unsubscribeMounts();
+      };
     },
     archive(sessionId: string, options?: { revisionFamily?: boolean }): Promise<void> {
       return invokeSessionRuntimeHost('sessions:archive', sessionId, options);
