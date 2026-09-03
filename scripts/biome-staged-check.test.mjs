@@ -71,3 +71,15 @@ test('ignores unstaged formatting drift when staged bytes are formatted', () => 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('skips a staged file that Biome leaves unprocessed', () => {
+  const root = fixture();
+  try {
+    writeFileSync(join(root, 'README.md'), '# heading\n');
+    execFileSync('git', ['add', 'README.md'], { cwd: root });
+
+    assert.equal(checkStagedWithBiome({ root, biomePath }), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

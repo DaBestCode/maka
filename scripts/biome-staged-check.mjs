@@ -61,6 +61,7 @@ export function checkStagedWithBiome({
       if (result.stderr.length > 0) process.stderr.write(result.stderr);
       return false;
     }
+    if (result.stdout.length === 0) continue;
     if (!result.stdout.equals(contents)) {
       process.stderr.write(`${path}: staged content is not formatted by Biome\n`);
       return false;
