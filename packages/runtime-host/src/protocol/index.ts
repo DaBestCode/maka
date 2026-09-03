@@ -100,7 +100,7 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 109 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 110 as const;
 // 109: accepted Client Capability invocations may carry one bounded nested form
 // Interaction request/result round trip.
 // 108: Session Interaction snapshots, forwarded Runtime events, and Agent Graph
