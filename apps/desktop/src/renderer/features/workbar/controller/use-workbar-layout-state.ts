@@ -152,8 +152,16 @@ export function useWorkbarLayoutState(
     [],
   );
   const closeWorkbarTabs = useCallback(
-    (placement: SessionWorkbarPlacement, tabIds: readonly string[]) =>
-      dispatch({ type: 'close', placement, tabIds }),
+    (
+      placement: SessionWorkbarPlacement,
+      tabIds: readonly string[],
+      options?: { preserveVisibility?: boolean },
+    ) =>
+      dispatch({
+        type: options?.preserveVisibility ? 'remove-stale' : 'close',
+        placement,
+        tabIds,
+      }),
     [],
   );
   const openWorkbarLauncher = useCallback(

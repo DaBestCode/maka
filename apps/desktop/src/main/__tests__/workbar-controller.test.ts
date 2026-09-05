@@ -179,6 +179,33 @@ describe('useWorkbarController', () => {
     assert.equal(controller().host.rightCollapsed, false);
   });
 
+  it("preserves the active Session's visibility while removing the previous Session's Terminal", async () => {
+    const { root } = installReactRenderer();
+    const defaults = createFakeWorkbarServices();
+    const services = createFakeWorkbarServices({
+      terminal: {
+        ...defaults.terminal,
+        start: async (sessionId) => shellUpdate(sessionId, 'terminal-a'),
+      },
+    });
+    const authoritativeSessionIds = new Set(['a', 'b']);
+    const show = (id: string) => renderController(root, services, {
+      ...input(session(id)),
+      authoritativeSessionIds,
+    });
+
+    await act(async () => show('b'));
+    await act(async () => controller().commands.toggleRight());
+    assert.equal(controller().host.rightCollapsed, false);
+    await act(async () => show('a'));
+    await act(async () => controller().commands.openTool('terminal'));
+    assert.equal(controller().host.panelsState.right.tabs.length, 1);
+    await act(async () => show('b'));
+
+    assert.equal(controller().host.panelsState.right.tabs.length, 0);
+    assert.equal(controller().host.rightCollapsed, false);
+  });
+
   it('projects the canonical project and absorbed aliases into the host model', async () => {
     const { root } = installReactRenderer();
     const controllerInput = input(session('a'));

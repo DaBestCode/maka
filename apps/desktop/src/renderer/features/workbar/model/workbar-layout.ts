@@ -26,6 +26,7 @@ import {
   readSessionWorkbarPanels,
   reduceWorkbarPanels,
   type SessionWorkbarPanelsState,
+  type SessionWorkbarPlacement,
   type WorkbarPanelsAction,
 } from './workbar-tabs.js';
 
@@ -58,6 +59,11 @@ export interface WorkbarLayoutState {
 
 export type WorkbarLayoutAction =
   | WorkbarPanelsAction
+  | {
+      type: 'remove-stale';
+      placement: SessionWorkbarPlacement;
+      tabIds: readonly string[];
+    }
   | { type: 'activate-session'; sessionId: string | undefined }
   | { type: 'retain-sessions'; sessionIds: ReadonlySet<string> }
   | {
@@ -240,7 +246,12 @@ export function reduceWorkbarLayout(
       : { ...state, bottomHeight };
   }
 
-  const panels = reduceWorkbarPanels(state.panels, action);
+  const panels = reduceWorkbarPanels(
+    state.panels,
+    action.type === 'remove-stale'
+      ? { type: 'close', placement: action.placement, tabIds: action.tabIds }
+      : action,
+  );
   if (panels === state.panels) return state;
   let rightCollapsed = isSessionWorkbarCollapsed(state);
   let bottomOpen = state.bottomOpen;
@@ -250,7 +261,10 @@ export function reduceWorkbarLayout(
   } else if (action.type === 'move-to-panel') {
     if (action.target === 'right') rightCollapsed = false;
     else bottomOpen = true;
-  } else if (action.type === 'close') {
+  } else if (
+    action.type === 'close' ||
+    (action.type === 'remove-stale' && action.placement === 'bottom')
+  ) {
     if (
       state.panels[action.placement].tabs.length > 0 &&
       panels[action.placement].tabs.length === 0

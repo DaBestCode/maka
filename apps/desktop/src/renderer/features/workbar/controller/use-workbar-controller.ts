@@ -449,6 +449,7 @@ export function useWorkbarController(
     (
       placement: SessionWorkbarPlacement,
       tabs: readonly SessionWorkbarTab[],
+      options?: { preserveVisibility?: boolean },
     ) => {
       if (tabs.length === 0) return;
       for (const tab of tabs) {
@@ -458,6 +459,7 @@ export function useWorkbarController(
       layout.closeWorkbarTabs(
         placement,
         tabs.map((tab) => tab.id),
+        options,
       );
       const panelIds = new Set(
         tabs
@@ -540,6 +542,7 @@ export function useWorkbarController(
         stale
           .filter((candidate) => candidate.placement === placement)
           .map((candidate) => candidate.tab),
+        { preserveVisibility: true },
       );
     }
   }, [
@@ -566,12 +569,14 @@ export function useWorkbarController(
       )
         ? 'right'
         : 'bottom';
-      layout.closeWorkbarTab(placement, tabId);
+      layout.closeWorkbarTabs(placement, [tabId], {
+        preserveVisibility: true,
+      });
     }
     sideConversations.removePanels(staleIds);
   }, [
     activeSessionId,
-    layout.closeWorkbarTab,
+    layout.closeWorkbarTabs,
     layout.workbarPanelsState,
     sideConversations.panels,
     sideConversations.removePanels,
